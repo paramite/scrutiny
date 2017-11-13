@@ -108,10 +108,10 @@ func setupDB() (*bolt.DB, error) {
         }
         return nil
     })
-	if err != nil {
-		return nil, fmt.Errorf("could not set up buckets, %v", err)
-	}
-	return db, nil
+    if err != nil {
+        return nil, fmt.Errorf("could not set up buckets, %v", err)
+    }
+    return db, nil
 }
 
 
@@ -123,16 +123,15 @@ func shouldInclude(db *bolt.DB, instance WatchedGerrit, change gerrit.ChangeInfo
 
     err := db.Update(func(tx *bolt.Tx) error {
 	    val := tx.Bucket([]byte(instance.Url)).Get([]byte(fmt.Sprintf("%d", change.Number)))
-        report("info", fmt.Errorf(""), fmt.Sprintf("%d - %s - %s", change.Number, val == nil, val))
         if val != nil {
             exists = true
             return nil
         } else {
             return tx.Bucket([]byte(instance.Url)).Put([]byte(fmt.Sprintf("%d", change.Number)), []byte("1"))
         }
-	})
-	if err != nil {
-		report("error", err, "Failed to browse DB.")
+    })
+    if err != nil {
+        report("error", err, "Failed to browse DB.")
     }
 
     return !exists
@@ -148,7 +147,7 @@ func cleanDb(db *bolt.DB, instance WatchedGerrit, open []gerrit.ChangeInfo) {
         openChanges[string(change.Number)] = true
     }
 
-    db.View(func(tx *bolt.Tx) error {
+    db.Update(func(tx *bolt.Tx) error {
         b := tx.Bucket([]byte(instance.Url))
         c := b.Cursor()
         for key, _ := c.First(); key != nil; key, _ = c.Next() {
@@ -156,20 +155,17 @@ func cleanDb(db *bolt.DB, instance WatchedGerrit, open []gerrit.ChangeInfo) {
                 b.Delete(key)
             }
         }
-	    return nil
+        return nil
     })
-
-
-
 }
 
 
 func main() {
     db, err := setupDB()
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer db.Close()
+    if err != nil {
+        report("error", err, "Failed to initialize DB.")
+    }
+    defer db.Close()
 
     for _, instance := range GERRITS {
         open := []gerrit.ChangeInfo{}
@@ -196,7 +192,6 @@ func main() {
                 for _, change := range *changes {
                     if len(r.FindString(change.Revisions[change.CurrentRevision].Commit.Message)) > 0 {
                         open = append(open, change)
-                        report("info", fmt.Errorf(""), fmt.Sprintf("%d - %s", change.Number, shouldInclude(db, instance, change)))
                         if shouldInclude(db, instance, change) {
                             found = append(found, change)
                         }
