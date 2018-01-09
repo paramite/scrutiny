@@ -6,11 +6,14 @@ import (
     "fmt"
     "log"
     "net/smtp"
+    "os"
+    "reflect"
     "regexp"
     "strings"
 
     "github.com/andygrunwald/go-gerrit"
     "github.com/boltdb/bolt"
+    "github.com/go-ini/ini"
 )
 
 
@@ -22,6 +25,7 @@ type WatchedGerrit struct {
 }
 
 
+var DEFAULT_CONFIG = "~/.config/scrutiny.conf"
 var GERRITS = []WatchedGerrit{
     WatchedGerrit{
         Mail: "rhos-mm@redhat.com",
@@ -50,8 +54,7 @@ var MAIL_PORT = 25
 var MAIL_SENDER = "mmagr@redhat.com"
 var MAIL_SUBJECT = "[gerrit] Changes required attention"
 var MAIL_HEADER = `
-Scrutiny found following gerrit changes which potentialy require your attention. Please check:
-
+Following gerrit changes potentialy require your attention. Please check:
 `
 
 
@@ -100,8 +103,8 @@ func sendMail(server string, port int, sender string, recipient string, body str
 * Opens DB connections and creates bucket for each gerrit instance
 * if it does not exist
 */
-func setupDB() (*bolt.DB, error) {
-    db, err := bolt.Open("scrutiny.db", 0600, nil)
+func setupDB(cfg ini.File) (*bolt.DB, error) {
+    db, err := bolt.Open(cfg.Section("").Key("db").String(), 0600, nil)
     if err != nil {
         return nil, fmt.Errorf("Could not open db: %v", err)
     }
@@ -176,14 +179,68 @@ func cleanDb(db *bolt.DB, instance WatchedGerrit, open []gerrit.ChangeInfo) {
 }
 
 
+func loadConfig() ini.File {
+    config := ""
+    if value, ok := os.LookupEnv(key); ok {
+        config = value
+    } else {
+        config = DEFAULT_CONFIG
+    }
+    return ini.Load(config)
+}
+
+
+/*
+* Loads data from config to WatchedGerrit
+*/
+func initInstances(cfg ini.File) []WatchedGerrit {
+    output := []WatchedGerrit{}
+    for gerrit := strings.Split(cfg.Section("").Key("gerrits").String(), ",") {
+        instance := WatchedGerrit{}
+        section, err := cfg.GetSection(fmt.Sprintf("gerrit:%s"))
+        if err != nil {
+            report("error", err, "Failed to load section in config")
+            continue
+        }
+
+        singleValues := [2]string{"mail", "url"}
+        for _, key := range singleValues {
+            key, err := section.GetKey(key)
+            if err == nil {
+                val := reflect.ValueOf(instance).Elem().FieldByName(key)
+                if val.IsValid() {
+                    val.SetString(key.String())
+                }
+            }
+        }
+
+        multiValues := [2]string{"projects", "regexps"}
+        for _, key := range multiValues {
+            key, err := section.GetKey(key)
+            if err == nil {
+                val := reflect.ValueOf(instance).Elem().FieldByName(key)
+                if val.IsValid() {
+                    val.Set(strings.Split(key.String(), ","))
+                }
+            }
+        }
+
+        append(output, instance)
+    }
+}
+
+
 func main() {
-    db, err := setupDB()
+    cfg := loadConfig()
+    allGerrits := initInstances(cfg)
+
+    db, err := setupDB(cfg)
     if err != nil {
         report("error", err, "Failed to initialize DB.")
     }
     defer db.Close()
 
-    for _, instance := range GERRITS {
+    for _, instance := range allGerrits {
         open := []gerrit.ChangeInfo{}
         found := []gerrit.ChangeInfo{}
         client, err := gerrit.NewClient(instance.Url, nil)
