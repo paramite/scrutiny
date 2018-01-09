@@ -6,57 +6,38 @@ import (
     "fmt"
     "log"
     "net/smtp"
+    "os"
+    "reflect"
     "regexp"
     "strings"
 
     "github.com/andygrunwald/go-gerrit"
     "github.com/boltdb/bolt"
+    "github.com/go-ini/ini"
 )
 
 
 type WatchedGerrit struct {
     Url string
     Projects []string
-    Rexps []string
+    Regexps []string
     Mail string
 }
 
-
-var GERRITS = []WatchedGerrit{
-    WatchedGerrit{
-        Mail: "rhos-mm@redhat.com",
-        Url: "https://review.openstack.org/",
-        Projects: []string{
-            "openstack/tripleo-common",
-            "openstack/tripleo-heat-templates",
-            "openstack/kolla",
-        },
-        Rexps: []string{
-            "[Aa]odh",
-            "[Cc]eilometer",
-            "[Cc]ollectd",
-            "[Ff]luentd",
-            "[Gg]nocchi",
-            "[Rr]syslog",
-            "[Ss]ensu",
-            "[Hh]ealth",
-            "[Mm]etric",
-            "[Ll]og ",
-            "[Ll]ogg",
-            "[Mm]ongodb",
-            "[Mm]onitor",
-            "[Pp]anko",
-            "[Rr]edis",
-        },
-    },
+type WatchedGerritKey struct {
+    Name string
+    IsList bool
 }
+
+var CONFIG_ENV = "SCRUTINY_CONF"
+var DEFAULT_CONFIG = "scrutiny.conf"
+
 var MAIL_SMTP = "smtp.corp.redhat.com"
 var MAIL_PORT = 25
 var MAIL_SENDER = "mmagr@redhat.com"
 var MAIL_SUBJECT = "[gerrit] Changes required attention"
 var MAIL_HEADER = `
-Scrutiny found following gerrit changes which potentialy require your attention. Please check:
-
+Following gerrit changes potentialy require your attention. Please check:
 `
 
 
@@ -105,13 +86,13 @@ func sendMail(server string, port int, sender string, recipient string, body str
 * Opens DB connections and creates bucket for each gerrit instance
 * if it does not exist
 */
-func setupDB() (*bolt.DB, error) {
-    db, err := bolt.Open("scrutiny.db", 0600, nil)
+func setupDB(cfg *ini.File, gerrits []WatchedGerrit) (*bolt.DB, error) {
+    db, err := bolt.Open(cfg.Section("default").Key("db").String(), 0600, nil)
     if err != nil {
         return nil, fmt.Errorf("Could not open db: %v", err)
     }
     err = db.Update(func(tx *bolt.Tx) error {
-        for _, instance := range GERRITS {
+        for _, instance := range gerrits {
             _, err := tx.CreateBucketIfNotExists([]byte(instance.Url))
             if err != nil {
                 return fmt.Errorf("Could not create root bucket: %v", err)
@@ -170,7 +151,7 @@ func cleanDb(db *bolt.DB, instance WatchedGerrit, open []gerrit.ChangeInfo) {
 
     db.Update(func(tx *bolt.Tx) error {
         bkt := tx.Bucket([]byte(instance.Url))
-        c := b.Cursor()
+        c := bkt.Cursor()
         for key, _ := c.First(); key != nil; key, _ = c.Next() {
             if _, exists := openChanges[string(key)]; !exists {
                 bkt.Delete(key)
@@ -181,14 +162,71 @@ func cleanDb(db *bolt.DB, instance WatchedGerrit, open []gerrit.ChangeInfo) {
 }
 
 
+func loadConfig() (*ini.File, error) {
+    config := ""
+    if value, ok := os.LookupEnv(CONFIG_ENV); ok {
+        config = value
+    } else {
+        config = DEFAULT_CONFIG
+    }
+    return ini.Load(config)
+}
+
+
+/*
+* Loads data from config to WatchedGerrit slice
+*/
+func initInstances(cfg *ini.File) []WatchedGerrit {
+    output := []WatchedGerrit{}
+    for _, gname := range cfg.Section("default").Key("gerrits").Strings(",") {
+        sectionName := fmt.Sprintf("gerrit:%s", gname)
+        section, err := cfg.GetSection(sectionName)
+        if err != nil {
+            report("error", err, "Failed to load section in config")
+            continue
+        }
+        // TODO: investigate if struct key discover could be done smarter way
+        instance := WatchedGerrit{}
+        instanceKeys := []WatchedGerritKey{
+          WatchedGerritKey{"Mail", false},
+          WatchedGerritKey{"Url", false},
+          WatchedGerritKey{"Projects", true},
+          WatchedGerritKey{"Regexps", true},
+        }
+        for _, keyStruct := range instanceKeys {
+            key, err := section.GetKey(strings.ToLower(keyStruct.Name))
+            report("error", err,
+              fmt.Sprintf("Failed to load '%s' config key in section %s.",
+                          keyStruct.Name, sectionName))
+            val := reflect.ValueOf(&instance).Elem().FieldByName(keyStruct.Name)
+            if val.IsValid() {
+                if keyStruct.IsList {
+                    val.Set(reflect.ValueOf(key.Strings(",")))
+                } else {
+                    val.Set(reflect.ValueOf(key.String()))
+                }
+            }
+        }
+        output = append(output, instance)
+    }
+    return output
+}
+
+
 func main() {
-    db, err := setupDB()
+    cfg, err := loadConfig()
+    if err != nil {
+        report("error", err, "Cannot load config file")
+    }
+    allGerrits := initInstances(cfg)
+
+    db, err := setupDB(cfg, allGerrits)
     if err != nil {
         report("error", err, "Failed to initialize DB.")
     }
     defer db.Close()
 
-    for _, instance := range GERRITS {
+    for _, instance := range allGerrits {
         open := []gerrit.ChangeInfo{}
         found := []gerrit.ChangeInfo{}
         client, err := gerrit.NewClient(instance.Url, nil)
@@ -207,7 +245,7 @@ func main() {
                 report("error", err, "Unable to query changes.")
             }
 
-            for _, rexp := range instance.Rexps {
+            for _, rexp := range instance.Regexps {
                 r, _ := regexp.Compile(rexp)
 
                 for _, change := range *changes {
