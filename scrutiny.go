@@ -24,11 +24,12 @@ type WatchedGerrit struct {
 
 var GERRITS = []WatchedGerrit{
     WatchedGerrit{
-        Mail: "rhos-opstools-dept-list@redhat.com",
+        Mail: "rhos-mm@redhat.com",
         Url: "https://review.openstack.org/",
         Projects: []string{
             "openstack/tripleo-common",
             "openstack/tripleo-heat-templates",
+            "openstack/kolla",
         },
         Rexps: []string{
             "[Cc]ollectd",
@@ -40,6 +41,7 @@ var GERRITS = []WatchedGerrit{
             "[Mm]etric",
             "[Ll]og ",
             "[Ll]ogg",
+            "[Mm]onitor",
         },
     },
 }
@@ -52,6 +54,10 @@ Scrutiny found following gerrit changes which potentialy require your attention.
 
 `
 
+
+/*
+* Logs given message with error message. Exits if level is "error".
+*/
 func report(level string, err error, msg string) {
     if err != nil {
         var handle func(string, ...interface{})
@@ -121,21 +127,31 @@ func setupDB() (*bolt.DB, error) {
 func shouldInclude(db *bolt.DB, instance WatchedGerrit, change gerrit.ChangeInfo) bool {
     exists := false
 
-    err := db.Update(func(tx *bolt.Tx) error {
-	    val := tx.Bucket([]byte(instance.Url)).Get([]byte(fmt.Sprintf("%d", change.Number)))
+    err := db.View(func(tx *bolt.Tx) error {
+        val := tx.Bucket([]byte(instance.Url)).Get([]byte(fmt.Sprintf("%d", change.Number)))
         if val != nil {
+            report("info", fmt.Errorf("%d", change.Number), "Already reported change")
             exists = true
-            return nil
-        } else {
-            return tx.Bucket([]byte(instance.Url)).Put([]byte(fmt.Sprintf("%d", change.Number)), []byte("1"))
         }
+        return nil
     })
     if err != nil {
         report("error", err, "Failed to browse DB.")
     }
 
+    if !exists {
+        report("info", fmt.Errorf("%d", change.Number), "New change")
+        err := db.Update(func(tx *bolt.Tx) error {
+            return tx.Bucket([]byte(instance.Url)).Put([]byte(fmt.Sprintf("%d", change.Number)), []byte("1"))
+        })
+        if err != nil {
+            report("error", err, "Failed to update DB.")
+        }
+    }
+
     return !exists
 }
+
 
 /*
 * Cleans db records of changes which are not reported by gerrit any more
@@ -144,15 +160,15 @@ func cleanDb(db *bolt.DB, instance WatchedGerrit, open []gerrit.ChangeInfo) {
     openChanges := map[string]bool{};
 
     for _, change := range open {
-        openChanges[string(change.Number)] = true
+        openChanges[fmt.Sprintf("%d", change.Number)] = true
     }
 
     db.Update(func(tx *bolt.Tx) error {
-        b := tx.Bucket([]byte(instance.Url))
+        bkt := tx.Bucket([]byte(instance.Url))
         c := b.Cursor()
         for key, _ := c.First(); key != nil; key, _ = c.Next() {
             if _, exists := openChanges[string(key)]; !exists {
-                b.Delete(key)
+                bkt.Delete(key)
             }
         }
         return nil
