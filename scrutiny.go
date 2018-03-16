@@ -32,6 +32,8 @@ var GERRITS = []WatchedGerrit{
             "openstack/kolla",
         },
         Rexps: []string{
+            "[Aa]odh",
+            "[Cc]eilometer",
             "[Cc]ollectd",
             "[Ff]luentd",
             "[Gg]nocchi",
@@ -41,7 +43,10 @@ var GERRITS = []WatchedGerrit{
             "[Mm]etric",
             "[Ll]og ",
             "[Ll]ogg",
+            "[Mm]ongodb",
             "[Mm]onitor",
+            "[Pp]anko",
+            "[Rr]edis",
         },
     },
 }
